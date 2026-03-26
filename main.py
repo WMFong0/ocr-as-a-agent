@@ -18,6 +18,7 @@ from typing import Any, Final
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, HttpUrl
 import requests
 
@@ -46,8 +47,8 @@ MODEL_VERSION: Final[str] = os.getenv("VISION_MODEL_VERSION", "latest")
 IMAGE_EXTS: set[str] = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif", ".webp"}
 PDF_EXTS: set[str] = {".pdf"}
 
-# FastAPI app entrypoint.
-app = FastAPI(title="OCR as an Agent", version="1.0.0")
+# FastAPI app entrypoint with Swagger UI at /docs.
+app = FastAPI(title="OCR as an Agent", version="1.0.0", docs_url="/docs")
 
 # ==================================
 # model
@@ -264,6 +265,11 @@ def ocr_pdf_bytes(pdf_bytes: bytes, session: requests.Session, dpi: int = 200) -
 # ==================================
 # API Routing
 # ==================================
+
+@app.get("/", include_in_schema=False)
+def root_redirect() -> RedirectResponse:
+    """Redirect root path to Swagger docs."""
+    return RedirectResponse(url="/docs")
 
 @app.get("/health")
 def health() -> dict[str, str]:
