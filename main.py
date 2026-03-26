@@ -149,7 +149,12 @@ def _post_ocr_bytes(payload: bytes, session: requests.Session, timeout_s: int = 
     """Call Azure OCR endpoint with retries and return JSON response.
 
     Retries are applied for throttling (429) and transient server-side failures
-    (5xx) using capped exponential backoff.
+    (5xx) using capped exponential backoff. Retry behavior:
+    - Attempt 1: immediate
+    - Attempt 2: 2 seconds
+    - Attempt 3: 4 seconds  
+    - Attempt 4: 8 seconds
+    - Attempt 5: 16 seconds
     """
     # Validate required credentials before issuing request.
     if not VISION_ENDPOINT or not VISION_KEY:
@@ -175,7 +180,8 @@ def _post_ocr_bytes(payload: bytes, session: requests.Session, timeout_s: int = 
         "Content-Type": "application/octet-stream",
     }
 
-    # Keep last response to improve final error detail when retries are exhausted.
+    # Keep track of throttling attempts for diagnostics.
+    retry_reasons: list[str] = []
     last_resp: requests.Response | None = None
 
     # Retry loop for transient HTTP responses.
@@ -183,10 +189,23 @@ def _post_ocr_bytes(payload: bytes, session: requests.Session, timeout_s: int = 
         resp = session.post(url, params=params, headers=headers, data=payload, timeout=timeout_s)
         last_resp = resp
 
-        # Retry when throttled or when server fails.
-        if resp.status_code in (429,) or (500 <= resp.status_code < 600):
-            # Capped exponential backoff.
-            time.sleep(min(2 ** attempt, 20))
+        # Check for throttling or server errors that warrant retry.
+        should_retry = False
+        retry_reason = ""
+        
+        if resp.status_code == 429:
+            should_retry = True
+            retry_reason = "rate-limited (429)"
+            retry_reasons.append(f"Attempt {attempt}: {retry_reason}")
+        elif 500 <= resp.status_code < 600:
+            should_retry = True
+            retry_reason = f"server error ({resp.status_code})"
+            retry_reasons.append(f"Attempt {attempt}: {retry_reason}")
+
+        if should_retry:
+            # Capped exponential backoff (max 20 seconds between attempts).
+            backoff: int = min(2 ** attempt, 20)
+            time.sleep(backoff)
             continue
 
         try:
@@ -196,9 +215,19 @@ def _post_ocr_bytes(payload: bytes, session: requests.Session, timeout_s: int = 
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}") from e
 
         # Successful OCR response.
-        return resp.json()
+        result = resp.json()
+        
+        # Include retry diagnostic info if retries occurred.
+        if retry_reasons:
+            result["_retry_history"] = retry_reasons
+        
+        return result
 
-    raise RuntimeError(f"Too many retries. Last HTTP {last_resp.status_code if last_resp else 'n/a'}")
+    # All retries exhausted - provide detailed error context.
+    error_msg = f"Too many retries (5 attempts exhausted). Last HTTP {last_resp.status_code if last_resp else 'n/a'}"
+    if retry_reasons:
+        error_msg += f"\nRetry history: {'; '.join(retry_reasons)}"
+    raise RuntimeError(error_msg)
 
 
 def _ocr_payload(data: bytes, filename: str | None, content_type: str | None) -> str:
@@ -295,6 +324,86 @@ def health() -> dict[str, str]:
     """Return service health status."""
     return {"status": "ok"}
 
+@app.get("/test-connection")
+def test_ms_connection() -> dict[str, Any]:
+    """Test Connection with MS Azure Vision Service.
+    
+    Validates that required environment variables are set and performs
+    a lightweight ping to the Azure Vision API endpoint.
+    """
+    result: dict[str, Any] = {"status": "ok", "details": {}}
+    
+    # Check required credentials.
+    if not VISION_ENDPOINT:
+        result["status"] = "error"
+        result["error"] = "VISION_ENDPOINT not configured"
+        return result
+    
+    if not VISION_KEY:
+        result["status"] = "error"
+        result["error"] = "VISION_KEY not configured"
+        return result
+    
+    # Record configuration (without exposing full key).
+    result["details"]["endpoint"] = VISION_ENDPOINT
+    result["details"]["api_version"] = API_VERSION
+    result["details"]["language"] = LANGUAGE
+    result["details"]["model_version"] = MODEL_VERSION
+    
+    # Try a minimal request to validate endpoint connectivity.
+    try:
+        url = f"{VISION_ENDPOINT}/computervision/imageanalysis:analyze"
+        headers = {
+            "Ocp-Apim-Subscription-Key": VISION_KEY,
+            "Content-Type": "application/octet-stream",
+        }
+        params = {
+            "features": "read",
+            "api-version": API_VERSION,
+        }
+        
+        # Create a tiny 1x1 PNG pixel (smallest valid image)
+        tiny_png = bytes([
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+            0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00,
+            0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0x99, 0x01, 0x01, 0x00, 0x00, 0xFE,
+            0xFF, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE5, 0x27, 0xDE, 0xFC, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
+        ])
+        
+        resp = requests.post(
+            url,
+            params=params,
+            headers=headers,
+            data=tiny_png,
+            timeout=30
+        )
+        
+        # Any non-auth-related response indicates connectivity.
+        if resp.status_code == 401 or resp.status_code == 403:
+            result["status"] = "error"
+            result["error"] = "Authentication failed: Invalid VISION_KEY or expired credentials"
+        elif resp.status_code >= 500:
+            result["status"] = "warning"
+            result["warning"] = f"Server error {resp.status_code}: {resp.text[:100]}"
+        elif resp.status_code == 200:
+            result["status"] = "ok"
+            result["message"] = "Successfully connected to Azure Vision API"
+        else:
+            result["message"] = f"API returned status {resp.status_code}"
+    
+    except requests.exceptions.Timeout:
+        result["status"] = "error"
+        result["error"] = "Connection timeout to Azure Vision endpoint"
+    except requests.exceptions.ConnectionError:
+        result["status"] = "error"
+        result["error"] = "Failed to connect to Azure Vision endpoint"
+    except Exception as e:
+        result["status"] = "error"
+        result["error"] = f"Unexpected error: {str(e)}"
+    
+    return result
 
 @app.post("/ocr/file")
 async def ocr_file(file: UploadFile = File(...)) -> dict[str, str]:

@@ -1,0 +1,60 @@
+# Git and version control
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv
+.venv
+env
+ENV
+build
+develop
+dist
+downloads
+eggs
+.eggs
+lib
+lib64
+parts
+sdist
+var
+wheels
+*.egg-info
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.virtualenvs
+.env*
+
+# IDE and editor
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache
+.coverage
+htmlcov
+.tox
+.hypothesis
+
+# Docker (keep Dockerfile and compose files in context but exclude ignore file itself)
+.dockerignore
+
+# Documentation
+docs
+
+# Project files (keep only necessary, exclude logs and examples)
+*.log
+.env.example

@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  ocr-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ocr-as-agent-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Azure AI Vision configuration - set these in your .env file or pass via -e flag.
+      VISION_ENDPOINT: ${VISION_ENDPOINT}
+      VISION_KEY: ${VISION_KEY}
+      VISION_API_VERSION: ${VISION_API_VERSION:-2024-02-01}
+      VISION_LANGUAGE: ${VISION_LANGUAGE:-zh-Hant}
+      VISION_MODEL_VERSION: ${VISION_MODEL_VERSION:-latest}
+      PDF_RENDER_DPI: ${PDF_RENDER_DPI:-200}
+      PORT: 8000
+    volumes:
+      # Optional: mount a local .env file for environment variables.
+      - .env:/app/.env:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
