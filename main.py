@@ -19,6 +19,8 @@ from typing import Any, Final
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import RedirectResponse
+from io import BytesIO
+from PIL import Image
 from pydantic import BaseModel, HttpUrl
 import requests
 
@@ -204,11 +206,28 @@ def _ocr_payload(data: bytes, filename: str | None, content_type: str | None) ->
     # PDF render DPI is configurable via environment.
     dpi = int(os.getenv("PDF_RENDER_DPI", "200"))
 
+    # Normalize non-PDF images (e.g. webp) into PNG bytes for broader OCR compatibility.
+    if not _is_pdf(filename, content_type, data):
+        data = _normalize_image_bytes(data)
+
     # Use a request-scoped session for API calls.
     with requests.Session() as session:
         if _is_pdf(filename, content_type, data):
             return ocr_pdf_bytes(data, session=session, dpi=dpi)
         return ocr_image_bytes(data, session=session)
+
+
+def _normalize_image_bytes(data: bytes) -> bytes:
+    """Convert image bytes into PNG bytes to maximize OCR endpoint compatibility."""
+    try:
+        with Image.open(BytesIO(data)) as img:
+            rgb = img.convert("RGB")
+            buf = BytesIO()
+            rgb.save(buf, format="PNG")
+            return buf.getvalue()
+    except Exception:
+        # If conversion fails, pass through original payload and let OCR endpoint decide.
+        return data
     
 # ==================================
 # Functions
@@ -301,8 +320,15 @@ async def ocr_file(file: UploadFile = File(...)) -> dict[str, str]:
 def ocr_url(req: UrlOCRRequest) -> dict[str, str]:
     """Download file from URL, run OCR, and return text output."""
     try:
-        # Download target file bytes with timeout.
-        resp = requests.get(str(req.url), timeout=60)
+        # Download target file bytes with timeout and browser-like user agent.
+        resp = requests.get(
+            str(req.url),
+            timeout=60,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; OCR-Agent/1.0)",
+                "Accept": "*/*",
+            },
+        )
         resp.raise_for_status()
 
         # Gather optional hints to improve type detection.
@@ -313,6 +339,8 @@ def ocr_url(req: UrlOCRRequest) -> dict[str, str]:
         # Reuse common OCR dispatcher for URL payload.
         text = _ocr_payload(resp.content, filename, content_type)
         return {"source": url_str, "text": text}
+    except requests.RequestException as e:
+        raise HTTPException(status_code=400, detail=f"Failed to download URL: {e}") from e
     except Exception as e:
         # Convert download/OCR failure into consistent API error response.
         raise HTTPException(status_code=500, detail=str(e)) from e
