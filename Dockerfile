@@ -32,8 +32,8 @@ COPY main.py .
 # Ensure pip packages are on PATH.
 ENV PATH=/root/.local/bin:$PATH
 
-# Expose the default port.
-EXPOSE 8000
+# Expose to 8082
+EXPOSE 8002
 
 # Health check.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
