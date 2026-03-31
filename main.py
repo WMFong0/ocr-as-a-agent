@@ -12,18 +12,21 @@ POST {endpoint}/computervision/imageanalysis:analyze?features=read&api-version=2
 
 from __future__ import annotations
 
+# .env
 import os
-import time
-from typing import Any, Final
-
 from dotenv import load_dotenv
+
+import time
+
+from typing import Any, Final
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import RedirectResponse
-from io import BytesIO
 from PIL import Image
 from pydantic import BaseModel, HttpUrl
 import requests
 
+# For Test
+from io import BytesIO
 # PyMuPDF is optional at import time so non-PDF OCR still works when missing.
 try:
     import fitz  # PyMuPDF
