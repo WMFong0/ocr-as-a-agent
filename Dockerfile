@@ -32,6 +32,9 @@ COPY main.py .
 # Ensure pip packages are on PATH.
 ENV PATH=/root/.local/bin:$PATH
 
+# Disable Python output buffering for real-time Docker logs.
+ENV PYTHONUNBUFFERED=1
+
 # Expose to 8082
 EXPOSE 8002
 

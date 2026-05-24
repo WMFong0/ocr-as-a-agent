@@ -1,7 +1,10 @@
 dotenv
 fastapi
-requests
 pymupdf
 uvicorn
 python-multipart
 pillow
+requests
+azure-cognitiveservices-vision-computervision
+azure-common
+msrest
