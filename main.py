@@ -8,8 +8,14 @@ Input modes:
 
 Azure AI Vision Image Analysis (Read OCR):
 POST {endpoint}/computervision/imageanalysis:analyze?features=read&api-version=2024-02-01
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+        reload=False,
+        workers=int(os.getenv("WORKERS", "25")),
+    )
 """
-
 from __future__ import annotations
 
 import logging
@@ -585,6 +591,7 @@ def ocr_url(req: UrlOCRRequest) -> dict[str, str]:
         # Download target file bytes with timeout and browser-like defaults.
         logger.debug(f"ocr_url: Downloading file from URL (timeout: 60s)")
         request_headers = {
+            # Browser Impersonation
             "User-Agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
             ),
@@ -649,4 +656,4 @@ if __name__ == "__main__":
         raise SystemExit("uvicorn is required. Install with: pip install uvicorn") from e
 
     # Start the API server with configurable port.
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=False, workers=25)
