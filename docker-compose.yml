@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: ocr-as-agent-api
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
       # Azure AI Vision configuration - set these in your .env file or pass via -e flag.
       VISION_ENDPOINT: ${VISION_ENDPOINT}

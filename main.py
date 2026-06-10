@@ -73,6 +73,8 @@ PDF_EXTS: set[str] = {".pdf"}
 # FastAPI app entrypoint with Swagger UI at /docs.
 app = FastAPI(title="OCR as an Agent", version="1.0.0", docs_url="/docs")
 
+OcrLine = dict[str, Any]
+
 # ==================================
 # model
 # ==================================
@@ -110,6 +112,214 @@ def _is_pdf(filename: str | None, content_type: str | None, data: bytes) -> bool
     return is_pdf_magic
 
 
+def _line_text(line: dict[str, Any]) -> str | None:
+    """Return normalized OCR line text from known Azure fields."""
+    text = line.get("text") or line.get("content")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    return None
+
+
+def _line_bbox(line: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    """Return (left, top, right, bottom) from Azure OCR line geometry."""
+    raw_bbox = line.get("boundingBox") or line.get("polygon")
+    points: list[tuple[float, float]] = []
+
+    if isinstance(raw_bbox, list):
+        if raw_bbox and all(isinstance(v, (int, float)) for v in raw_bbox):
+            coords = [float(v) for v in raw_bbox]
+            points = list(zip(coords[0::2], coords[1::2]))
+        else:
+            for point in raw_bbox:
+                if isinstance(point, dict):
+                    x = point.get("x")
+                    y = point.get("y")
+                    if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                        points.append((float(x), float(y)))
+                elif (
+                    isinstance(point, (list, tuple))
+                    and len(point) >= 2
+                    and isinstance(point[0], (int, float))
+                    and isinstance(point[1], (int, float))
+                ):
+                    points.append((float(point[0]), float(point[1])))
+
+    if not points:
+        return None
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _make_ocr_line(line: dict[str, Any]) -> OcrLine | None:
+    """Create a sortable line record when text and geometry are available."""
+    text = _line_text(line)
+    bbox = _line_bbox(line)
+    if not text or bbox is None:
+        return None
+
+    left, top, right, bottom = bbox
+    if right <= left or bottom <= top:
+        return None
+
+    return {
+        "text": text,
+        "left": left,
+        "top": top,
+        "right": right,
+        "bottom": bottom,
+        "width": right - left,
+        "height": bottom - top,
+        "x_center": (left + right) / 2,
+        "y_center": (top + bottom) / 2,
+    }
+
+
+def _median(values: list[float], default: float) -> float:
+    """Return a median without adding a runtime dependency."""
+    if not values:
+        return default
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _row_sort_key(line: OcrLine) -> tuple[float, float]:
+    """Sort key for regular top-to-bottom, left-to-right line reading."""
+    return line["top"], line["left"]
+
+
+def _split_vertical_sections(lines: list[OcrLine]) -> list[list[OcrLine]]:
+    """Split page lines into vertical sections before column detection.
+
+    Full-width headings above a multi-column body should remain before the
+    columns, so we first partition on large vertical whitespace.
+    """
+    if len(lines) <= 1:
+        return [lines]
+
+    ordered = sorted(lines, key=_row_sort_key)
+    heights = [line["height"] for line in ordered]
+    median_height = _median(heights, 12.0)
+    gap_threshold = max(median_height * 2.4, 24.0)
+
+    sections: list[list[OcrLine]] = []
+    current: list[OcrLine] = [ordered[0]]
+    current_bottom = ordered[0]["bottom"]
+
+    for line in ordered[1:]:
+        gap = line["top"] - current_bottom
+        if gap > gap_threshold:
+            sections.append(current)
+            current = [line]
+        else:
+            current.append(line)
+        current_bottom = max(current_bottom, line["bottom"])
+
+    sections.append(current)
+    return sections
+
+
+def _split_columns(lines: list[OcrLine]) -> list[list[OcrLine]]:
+    """Split a vertical section into detected columns from left to right."""
+    if len(lines) < 4:
+        return [sorted(lines, key=_row_sort_key)]
+
+    section_left = min(line["left"] for line in lines)
+    section_right = max(line["right"] for line in lines)
+    section_width = max(section_right - section_left, 1.0)
+    median_width = _median([line["width"] for line in lines], section_width)
+
+    # If several lines are nearly full width, this section is probably a
+    # heading/list area rather than independent columns.
+    wide_lines = [line for line in lines if line["width"] >= section_width * 0.72]
+    if len(wide_lines) >= max(2, len(lines) // 3):
+        return [sorted(lines, key=_row_sort_key)]
+
+    ordered = sorted(lines, key=lambda line: (line["left"], line["top"]))
+    left_threshold = max(median_width * 0.35, section_width * 0.10, 40.0)
+    columns: list[list[OcrLine]] = [[ordered[0]]]
+    column_lefts: list[float] = [ordered[0]["left"]]
+
+    for line in ordered[1:]:
+        if line["left"] - column_lefts[-1] > left_threshold:
+            columns.append([line])
+            column_lefts.append(line["left"])
+        else:
+            columns[-1].append(line)
+            column_lefts[-1] = min(column_lefts[-1], line["left"])
+
+    if len(columns) == 1:
+        return [sorted(lines, key=_row_sort_key)]
+
+    # Very small trailing clusters are often side notes/noise, not a real
+    # document column. Keep normal row order if the split looks accidental.
+    min_column_size = max(2, len(lines) // 12)
+    if any(len(column) < min_column_size for column in columns):
+        return [sorted(lines, key=_row_sort_key)]
+
+    return [sorted(column, key=_row_sort_key) for column in columns]
+
+
+def _sort_ocr_lines_by_layout(lines: list[OcrLine]) -> list[str]:
+    """Return text in page layout order, with multi-column sections handled."""
+    sorted_text: list[str] = []
+    for section in _split_vertical_sections(lines):
+        section_left = min(line["left"] for line in section)
+        section_right = max(line["right"] for line in section)
+        section_width = max(section_right - section_left, 1.0)
+        buffered_lines: list[OcrLine] = []
+
+        for line in sorted(section, key=_row_sort_key):
+            is_full_width = len(section) >= 4 and line["width"] >= section_width * 0.72
+            if is_full_width:
+                for column in _split_columns(buffered_lines):
+                    sorted_text.extend(buffered_line["text"] for buffered_line in column)
+                buffered_lines = []
+                sorted_text.append(line["text"])
+            else:
+                buffered_lines.append(line)
+
+        for column in _split_columns(buffered_lines):
+            sorted_text.extend(line["text"] for line in column)
+    return sorted_text
+
+
+def _collect_lines_from_result(result: dict[str, Any]) -> tuple[list[OcrLine], list[str]]:
+    """Collect OCR lines, preserving a plain fallback order for no-geometry cases."""
+    positioned: list[OcrLine] = []
+    fallback: list[str] = []
+
+    def add_line(line: Any) -> None:
+        if not isinstance(line, dict):
+            return
+        text = _line_text(line)
+        if not text:
+            return
+        fallback.append(text)
+        positioned_line = _make_ocr_line(line)
+        if positioned_line is not None:
+            positioned.append(positioned_line)
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "lines" and isinstance(value, list):
+                    for line in value:
+                        add_line(line)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(result)
+    return positioned, fallback
+
+
 def _extract_text_from_result(result: dict[str, Any]) -> str:
     """Extract OCR text lines from Azure Image Analysis response payload.
 
@@ -118,7 +328,18 @@ def _extract_text_from_result(result: dict[str, Any]) -> str:
     then falls back to a recursive scan for `lines` collections.
     """
     logger.debug(f"_extract_text_from_result: Starting text extraction from result keys: {list(result.keys())}")
-    # Collect final output lines in reading order as best as possible.
+    positioned_lines, fallback_lines = _collect_lines_from_result(result)
+    if positioned_lines and len(positioned_lines) == len(fallback_lines):
+        lines_out = _sort_ocr_lines_by_layout(positioned_lines)
+        final_text = "\n".join(lines_out).strip()
+        logger.info(
+            "_extract_text_from_result: Extracted %s positioned lines after layout sorting. Final text length: %s chars",
+            len(lines_out),
+            len(final_text),
+        )
+        return final_text
+
+    # Collect final output lines in provider order if geometry is unavailable.
     lines_out: list[str] = []
 
     # Most responses place OCR data under `readResult`.
