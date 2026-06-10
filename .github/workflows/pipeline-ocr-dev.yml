@@ -1,4 +1,4 @@
-name: CLSense Backend Dev Pipeline
+name: OCR API Dev Pipeline
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
       - .dockerignore
       - .env
       - docker-compose.yml
-      - .github/workflows/pipeline-cls-dev.yml
+      - .github/workflows/pipeline-ocr-dev.yml
 
 env:
   DOCKERHUB_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/ocr-as-a-agent-ocr-api
@@ -34,7 +34,7 @@ jobs:
 
       - name: Build image
         run: |
-          docker build ./backend \
+          docker build . \
             --pull \
             -t ${{ env.DOCKERHUB_IMAGE_NAME }}:latest
 
